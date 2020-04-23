@@ -7,7 +7,7 @@ from keras import activations
 
 class PredNetInceptionCustom(Recurrent):
 
-    def __init__(self, channels_a, channels_r, glob_filter_size, output_mode='error', **kwargs):
+    def __init__(self, channels_a, channels_r, glob_filter_size, output_mode='error', data_format=backend.image_data_format(), **kwargs):
         super(PredNetInceptionCustom, self).__init__(**kwargs)
         self.conv_layers = {c: [] for c in ['i1', 'f1', 'c1', 'o1','i3', 'f3', 'c3', 'o3','i5', 'f5', 'c5', 'o5', 'a', 'ahat']}
         self.channels_a = channels_a  # size = n (first is the input size, followed by n-1 nchannels
@@ -16,24 +16,30 @@ class PredNetInceptionCustom(Recurrent):
         self.glob_filter_size = glob_filter_size
         self.output_mode = output_mode
         assert len(channels_a) == len(self.channels_r), 'channels in a and r should be equals, please check your arguments'
+        assert data_format in {'channels_last',
+                               'channels_first'}, 'data_format must be in {channels_last, channels_first}'
+        self.data_format = data_format
+        self.channel_axis = -3 if data_format == 'channels_first' else -1
+        self.row_axis = -2 if data_format == 'channels_first' else -3
+        self.column_axis = -1 if data_format == 'channels_first' else -2
         for i in range(self.layer_size):
             for c in ['i1', 'f1', 'c1', 'o1']:
                 act = 'tanh' if c == 'c' else 'hard_sigmoid'
-                self.conv_layers[c].append(Conv2D(self.channels_r[i], 1, padding='same', activation=act))
+                self.conv_layers[c].append(Conv2D(self.channels_r[i], 1, padding='same', activation=act, data_format=self.data_format))
             for c in ['i3', 'f3', 'c3', 'o3']:
                 act = 'tanh' if c == 'c' else 'hard_sigmoid'
-                self.conv_layers[c].append(Conv2D(self.channels_r[i], 3, padding='same', activation=act))
+                self.conv_layers[c].append(Conv2D(self.channels_r[i], 3, padding='same', activation=act, data_format=self.data_format))
             for c in ['i5', 'f5', 'c5', 'o5']:
                 act = 'tanh' if c == 'c' else 'hard_sigmoid'
-                self.conv_layers[c].append(Conv2D(self.channels_r[i], 5, padding='same', activation=act))
+                self.conv_layers[c].append(Conv2D(self.channels_r[i], 5, padding='same', activation=act, data_format=self.data_format))
 
-            self.conv_layers['ahat'].append(Conv2D(self.channels_a[i], self.glob_filter_size, padding='same', activation='relu'))
+            self.conv_layers['ahat'].append(Conv2D(self.channels_a[i], self.glob_filter_size, padding='same', activation='relu', data_format=self.data_format))
 
         for i in range(1, self.layer_size):
-            self.conv_layers['a'].append(Conv2D(self.channels_a[i], self.glob_filter_size, padding='same', activation='relu'))
+            self.conv_layers['a'].append(Conv2D(self.channels_a[i], self.glob_filter_size, padding='same', activation='relu', data_format=self.data_format))
 
-        self.upsample = UpSampling2D()
-        self.pool = MaxPooling2D()
+        self.upsample = UpSampling2D(data_format=self.data_format)
+        self.pool = MaxPooling2D(data_format=self.data_format)
         self.input_spec = [InputSpec(ndim=5)]
 
     def compute_output_shape(self, input_shape):
@@ -48,11 +54,12 @@ class PredNetInceptionCustom(Recurrent):
 
     def get_initial_state(self, x):
         input_shape = self.input_spec[0].shape
-        init_nb_row = input_shape[-2]
-        init_nb_col = input_shape[-1]
+        init_nb_row = input_shape[self.row_axis]
+        init_nb_col = input_shape[self.column_axis]
         base_initial_state = backend.zeros_like(x)
+        non_channel_axis = -1 if self.data_format == 'channels_first' else -2
         for _ in range(2):
-            base_initial_state = backend.sum(base_initial_state, axis=-1)
+            base_initial_state = backend.sum(base_initial_state, axis=non_channel_axis)
         base_initial_state = backend.sum(base_initial_state, axis=1)  # (samples, nb_channels)
         states_to_pass = ['r', 'c', 'e']
         initial_states = []
@@ -70,9 +77,12 @@ class PredNetInceptionCustom(Recurrent):
                     stack_size = self.channels_a[l]
                 output_size = stack_size * nb_row * nb_col  # flattened size
 
-                reducer = backend.zeros((input_shape[-3], output_size))  # (nb_channels, output_size)
+                reducer = backend.zeros((input_shape[self.channel_axis], output_size))  # (nb_channels, output_size)
                 initial_state = backend.dot(base_initial_state, reducer) # (samples, output_size)
-                output_shp = (-1, stack_size, nb_row, nb_col)
+                if self.data_format == 'channels_first':
+                    output_shp = (-1, stack_size, nb_row, nb_col)
+                else:
+                    output_shp = (-1, nb_row, nb_col, stack_size)
                 initial_state = backend.reshape(initial_state, output_shp)
                 initial_states += [initial_state]
         return initial_states
@@ -81,7 +91,8 @@ class PredNetInceptionCustom(Recurrent):
         #recursively calling build on all its layers
         self.input_spec = [InputSpec(shape=input_shape)]
         self.trainable_weights = []
-        nb_row, nb_col = (input_shape[-2], input_shape[-1])
+        nb_row, nb_col = (input_shape[-2], input_shape[-1]) if self.data_format == 'channels_first' else (input_shape[-3], input_shape[-2])
+
         for c in sorted(self.conv_layers.keys()):
             for l in range(len(self.conv_layers[c])):
                 ds_factor = 2 ** l
@@ -94,6 +105,7 @@ class PredNetInceptionCustom(Recurrent):
                     if l < self.layer_size - 1:
                         nb_channels += self.channels_r[l + 1]*3
                 in_shape = (input_shape[0], nb_channels, nb_row // ds_factor, nb_col // ds_factor)
+                if self.data_format == 'channels_last': in_shape = (in_shape[0], in_shape[2], in_shape[3], in_shape[1])
                 with backend.name_scope('layer_' + c + '_' + str(l)):
                     self.conv_layers[c][l].build(in_shape)
                 self.trainable_weights += self.conv_layers[c][l].trainable_weights
@@ -111,19 +123,19 @@ class PredNetInceptionCustom(Recurrent):
             inputs = [r_tm1[l], e_tm1[l]]
             if l < self.layer_size - 1:
                 inputs.append(r_up)
-            inputs = backend.concatenate(inputs, axis=-3)
+            inputs = backend.concatenate(inputs, axis=self.channel_axis)
             f = backend.concatenate([self.conv_layers['f1'][l].call(inputs), self.conv_layers['f3'][l].call(inputs)],
-                                    axis=-3)
-            f = backend.concatenate([f, self.conv_layers['f5'][l].call(inputs)], axis=-3)
+                                    axis=self.channel_axis)
+            f = backend.concatenate([f, self.conv_layers['f5'][l].call(inputs)], axis=self.channel_axis)
             i = backend.concatenate([self.conv_layers['i1'][l].call(inputs), self.conv_layers['i3'][l].call(inputs)],
-                                    axis=-3)
-            i = backend.concatenate([i, self.conv_layers['i5'][l].call(inputs)], axis=-3)
+                                    axis=self.channel_axis)
+            i = backend.concatenate([i, self.conv_layers['i5'][l].call(inputs)], axis=self.channel_axis)
             o = backend.concatenate([self.conv_layers['o1'][l].call(inputs), self.conv_layers['o3'][l].call(inputs)],
-                                    axis=-3)
-            o = backend.concatenate([o, self.conv_layers['o5'][l].call(inputs)], axis=-3)
+                                    axis=self.channel_axis)
+            o = backend.concatenate([o, self.conv_layers['o5'][l].call(inputs)], axis=self.channel_axis)
             g = backend.concatenate([self.conv_layers['c1'][l].call(inputs), self.conv_layers['c3'][l].call(inputs)],
-                                    axis=-3)
-            g = backend.concatenate([g, self.conv_layers['c5'][l].call(inputs)], axis=-3)
+                                    axis=self.channel_axis)
+            g = backend.concatenate([g, self.conv_layers['c5'][l].call(inputs)], axis=self.channel_axis)
             _c = f * c_tm1[l] + i * g
             _r = o * activations.get('tanh')(_c)
             c.insert(0, _c)
@@ -142,7 +154,7 @@ class PredNetInceptionCustom(Recurrent):
             e_up = activations.get('relu')(ahat - a)
             e_down = activations.get('relu')(a - ahat)
 
-            e.append(backend.concatenate((e_up, e_down), axis=-3))
+            e.append(backend.concatenate((e_up, e_down), axis=self.channel_axis))
             if(self.output_mode == 'error'):
                 output  = e[l]
             output = ahat
@@ -165,6 +177,7 @@ class PredNetInceptionCustom(Recurrent):
     def get_config(self):
         config = {'Channels in a': self.channels_a,
                   'Channels in r': self.channels_r,
-                  'Global filter size': self.glob_filter_size}
+                  'Global filter size': self.glob_filter_size,
+                  'data_format' : self.data_format}
         base_config = super(PredNetInceptionCustom, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))

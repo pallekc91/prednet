@@ -37,11 +37,9 @@ batch_size = 4
 samples_per_epoch = 500
 N_seq_val = 100  # number of sequences to use for validation
 
-backend.set_image_data_format("channels_first")
-
 # Model parameters
 n_channels, im_height, im_width = (3, 128, 160)
-input_shape = (n_channels, im_height, im_width)
+input_shape = (n_channels, im_height, im_width) if K.image_data_format() == 'channels_first' else (im_height, im_width, n_channels)
 channels_a = (n_channels, 48, 96, 192)
 channels_r = channels_a
 glob_filter_size = 3
