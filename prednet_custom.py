@@ -84,7 +84,6 @@ class PredNetCustom(Recurrent):
     def build(self, input_shape):
         #recursively calling build on all its layers
         self.input_spec = [InputSpec(shape=input_shape)]
-        print("input shape at build, ", input_shape)
         self.trainable_weights = []
         nb_row, nb_col = (input_shape[-2], input_shape[-1]) if self.data_format == 'channels_first' else (input_shape[-3], input_shape[-2])
         for c in sorted(self.conv_layers.keys()):
@@ -107,7 +106,6 @@ class PredNetCustom(Recurrent):
         self.states = [None] * self.layer_size * 3
 
     def step(self, a, states):
-        print("input shape at step, ", a.shape)
         r_tm1 = states[:self.layer_size]
         c_tm1 = states[self.layer_size:2 * self.layer_size]
         e_tm1 = states[2 * self.layer_size:3 * self.layer_size]
@@ -118,8 +116,6 @@ class PredNetCustom(Recurrent):
             inputs = [r_tm1[l], e_tm1[l]]
             if l < self.layer_size - 1:
                 inputs.append(r_up)
-            print(inputs[0].shape)
-            print(inputs[1].shape)
             inputs = backend.concatenate(inputs, axis=self.channel_axis)
             i = self.conv_layers['i'][l].call(inputs)
             f = self.conv_layers['f'][l].call(inputs)
